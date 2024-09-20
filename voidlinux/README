@@ -1,0 +1,180 @@
+Construir a imagem
+No mesmo diretório onde você salvou o Dockerfile, execute o comando para construir a imagem:
+# sudo docker build -t voidlinux-container .
+
+Verificar a imagem
+Após a construção da imagem, você pode listar as imagens disponíveis no Docker para garantir que ela foi criada:
+
+# sudo docker images
+
+3. Executar o container
+Agora, você pode iniciar o container com o seguinte comando:
+
+# sudo docker run -it voidlinux-container
+
+6. Verificar o Status do Docker
+Se houver problemas com o Docker CLI ou o serviço Docker, isso pode afetar o envio. Verifique se o Docker está funcionando corretamente:
+#sudo docker info
+
+7. Rebuild e Retry
+Às vezes, reconstruir a imagem e tentar o push novamente pode resolver o problema:
+
+#sudo docker build -t vcatafesta/voidlinux-docker:latest .
+#sudo docker push vcatafesta/voidlinux-docker:latest
+
+#sudo docker login
+#sudo docker build -t vcatafesta/voidlinux-docker:latest .
+#sudo docker push vcatafesta/voidlinux-docker:latest
+
+- yml
+jobs:
+  build:
+    name: Build ISO ${{ github.event.client_payload.edition || 'Unknown' }}
+    runs-on: ubuntu-latest
+    container:
+      image: vcatafesta/voidlinux-docker:latest
+      options: --privileged
+      volumes:
+        - /mnt/var_lib_manjaro_tools_buildiso:/var/lib/manjaro-tools/buildiso
+        - /mnt/var_cache_manjaro_tools_iso:/var/cache/manjaro-tools/iso
+
+- name: Debug Info
+  run: |
+    docker ps -a
+    docker images
+    docker logs void-container || echo "No logs available"
+
+
+name: ISO Build
+
+on:
+  repository_dispatch:
+    types:
+      - "ISO-*"
+  workflow_dispatch:
+    inputs:
+      name:
+        type: string
+        description: "Name for the ISO"
+        required: true
+        default: "bigcommunity"
+
+jobs:
+  build:
+    name: Build ISO ${{ github.event.client_payload.edition || 'Unknown' }}
+    runs-on: ubuntu-latest
+    container:
+      image: vcatafesta/voidlinux-docker:latest
+      options: --privileged
+      volumes:
+        - /mnt/var_lib_manjaro_tools_buildiso:/var/lib/manjaro-tools/buildiso
+        - /mnt/var_cache_manjaro_tools_iso:/var/cache/manjaro-tools/iso
+
+    steps:
+      - name: Set up volume directory on HOST
+        run: |
+          mkdir -p /mnt/var_lib_manjaro_tools_buildiso
+          mkdir -p /mnt/var_cache_manjaro_tools_iso
+
+      - name: Install Required Libraries
+        run: |
+          xbps-install -Sy --no-confirm libstdc++ vim curl git bash
+
+      - name: Display the current user in container
+        run: |
+          echo "#########################################"
+          echo "Current container is: $(hostname)"
+          echo "Current user is: $(whoami)"
+          echo "Current user ID is: $(id -u)"
+          echo "Current user details:"
+          id
+          echo "#########################################"
+          df -hT
+          echo "#########################################"
+          ls -la /mnt
+          echo "#########################################"
+
+      - name: Initial Debug
+        run: |
+          echo "Workflow started"
+          echo "Event Name: ${{ github.event_name }}"
+          echo "Event Action: ${{ github.event.action }}"
+          echo "Edition: ${{ github.event.client_payload.edition || inputs.edition }}"
+          echo "Tmate from payload: ${{ github.event.client_payload.tmate }}"
+          echo "Full github event: ${{ toJson(github.event) }}"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build ISO
+        uses: ./
+        id: build
+        with:
+          name: ${{ github.event.client_payload.name || inputs.name }}
+          edition: ${{ github.event.client_payload.edition || inputs.edition }}
+          release_tag: ${{ github.event.client_payload.release_tag || inputs.release_tag }}
+          kernel: ${{ github.event.client_payload.kernel || inputs.kernel }}
+          scope: ${{ github.event.client_payload.scope || inputs.scope }}
+          office-chooser: ${{ github.event.client_payload.office-chooser || inputs.office-chooser }}
+
+          # Parâmetros de branches
+          manjaro_branch: ${{ github.event.client_payload.manjaro_branch || inputs.manjaro_branch }}
+          community_branch: ${{ github.event.client_payload.community_branch || inputs.community_branch }}
+          biglinux_branch: ${{ github.event.client_payload.biglinux_branch || inputs.biglinux_branch }}
+
+          # Depuração
+          tmate: ${{ github.event.client_payload.tmate || 'false' }}
+
+          # Tokens e segredos
+          github_token: ${{ secrets.TOKEN_RELEASE }}
+
+      - name: Set ISO path
+        run: echo "ISO_PATH=${{ env.WORK_PATH }}/${{ env.ISO_BASENAME }}" >> $GITHUB_ENV
+
+      - name: Calculate ISO MD5 Hash
+        shell: bash
+        run: |
+          echo "Calculating MD5 hash for ISO file..."
+          echo "ISO_PATH is: '${{ env.ISO_PATH }}'"
+          if [ -f "${{ env.ISO_PATH }}" ]; then
+            md5sum "${{ env.ISO_PATH }}" > "${{ env.ISO_PATH }}.md5"
+            echo "MD5 hash calculated and saved:"
+            cat "${{ env.ISO_PATH }}.md5"
+          else
+            echo "Error: ISO file not found at ${{ env.ISO_PATH }}"
+            exit 1
+          fi
+
+      - name: Prepare ISO for release
+        id: prepare-iso
+        shell: bash
+        run: |
+          ls -lh
+          release=$(basename "${{ env.ISO_PATH }}" .iso)
+          zip -j -0 -s 2000m ${release}.zip ${{ env.ISO_PATH }}
+          echo "release_name=${release}" >> $GITHUB_OUTPUT
+          echo "ISO prepared for release"
+
+      - name: Upload ISO as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ steps.prepare-iso.outputs.release_name }}
+          path: |
+            ${{ env.ISO_PATH }}
+            ${{ env.ISO_PATH }}.md5
+            ${{ env.ISO_PATH }}.pkgs
+
+      - name: Create Release
+        if: ${{ (github.event.client_payload.manjaro_branch || inputs.manjaro_branch) == 'stable' && (github.event.client_payload.community_branch || inputs.community_branch) == 'stable' && (github.event.client_payload.biglinux_branch || inputs.biglinux_branch) == 'stable' }}
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ${{ env.ISO_PATH }}
+            ${{ env.ISO_PATH }}.md5
+            ${{ env.ISO_PATH }}.pkgs
+            ${{ steps.prepare-iso.outputs.release_name }}.z*
+          tag_name: ${{ github.event.client_payload.release_tag || inputs.release_tag }}
+          name: ${{ steps.prepare-iso.outputs.release_name }}
+          generate_release_notes: true
